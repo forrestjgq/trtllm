@@ -16,6 +16,7 @@
  */
 
 #include <cstdio>
+#include <unistd.h>
 
 #include "lookupPlugin.h"
 #include "tensorrt_llm/kernels/lookupKernels.h"
@@ -26,6 +27,11 @@ using namespace tensorrt_llm::kernels;
 using namespace tensorrt_llm::common;
 using tensorrt_llm::plugins::LookupPluginCreator;
 using tensorrt_llm::plugins::LookupPlugin;
+
+#ifdef USE_DGTRT
+#include "storage.h"
+#define DGTRT_DBG 0
+#endif
 
 static const char* LOOKUP_PLUGIN_VERSION{"1"};
 static const char* LOOKUP_PLUGIN_NAME{"Lookup"};
@@ -114,7 +120,7 @@ size_t LookupPlugin::getWorkspaceSize(const nvinfer1::PluginTensorDesc* inputs, 
     return 0;
 }
 
-int LookupPlugin::enqueue(const nvinfer1::PluginTensorDesc* inputDesc, const nvinfer1::PluginTensorDesc* outputDesc,
+int LookupPlugin::enqueue_old(const nvinfer1::PluginTensorDesc* inputDesc, const nvinfer1::PluginTensorDesc* outputDesc,
     const void* const* inputs, void* const* outputs, void* workspace, cudaStream_t stream) noexcept
 {
     // inputs
@@ -154,6 +160,85 @@ int LookupPlugin::enqueue(const nvinfer1::PluginTensorDesc* inputDesc, const nvi
         invokeLookUp<__nv_bfloat16, int>(output, input, weight, batchSize, offset, localVocabSize, hidden, stream);
     }
 
+    return 0;
+}
+int LookupPlugin::enqueue(const nvinfer1::PluginTensorDesc* inputDesc, const nvinfer1::PluginTensorDesc* outputDesc,
+    const void* const* inputs, void* const* outputs, void* workspace, cudaStream_t stream) noexcept
+{
+    enqueue_old(inputDesc, outputDesc, inputs, outputs, workspace, stream);
+
+#if USE_DGTRT
+    if (dg::is_request_storage_enabled()) {
+#if DGTRT_DBG
+        printf("storage enabled @ %d\n", (int)getpid());
+#endif
+        int batchSize = 1;
+        for (int i = 0; i < inputDesc[0].dims.nbDims; ++i)
+        {
+            batchSize *= inputDesc[0].dims.d[i];
+#if DGTRT_DBG
+            printf("in dim %d: %d\n", i, inputDesc[0].dims.d[i]);
+#endif
+        }
+#if DGTRT_DBG
+        for (int i = 0; i < outputDesc[0].dims.nbDims; ++i)
+        {
+            printf("out dim %d: %d\n", i, outputDesc[0].dims.d[i]);
+        }
+#endif
+        // image feature is a big thing
+        if (batchSize < 500) {
+            return 0;
+        }
+        const int hidden = inputDesc[1].dims.d[inputDesc[1].dims.nbDims - 1];
+        const int* input = reinterpret_cast<const int*>(inputs[0]);
+        uint8_t* output = reinterpret_cast<uint8_t*>(outputs[0]);
+        // input carries input ids from multi batches, and there are some blocks with nagtive
+        // ids inside, those blocks are images and each block follows the rule of:
+        // [-200 -size-of-block -id-for-storage]
+        
+        auto data = std::shared_ptr<int>(new int[batchSize]);
+        auto cpu = data.get();
+        memset(cpu, 0, sizeof(int) * batchSize);
+        cudaMemcpyAsync(cpu, input, sizeof(int) * batchSize, cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+
+        int itemSize = sizeof(float);
+        if (mType == DataType::kHALF)
+        {
+            itemSize = sizeof(half);
+        }
+        else if (mType == DataType::kBF16)
+        {
+            itemSize = sizeof(__nv_bfloat16);
+        }
+
+        auto hiddenSize = itemSize * hidden;
+#if DGTRT_DBG
+        printf("item sz %d hidden %d bhidden %d\n", itemSize, hidden, hiddenSize);
+#endif
+        int idx = 0;
+        while (idx < batchSize - 100) {
+            if (cpu[idx] == -200) {
+                auto szBlock = cpu[idx+1];
+                auto id = cpu[idx+2];
+                auto ptr = dg::get_request_storage(id);
+                if (ptr == nullptr) {
+                    printf("request storage data not found: %d\n", id);
+                } else {
+                    cudaMemcpyAsync(output + idx * hiddenSize, ptr, szBlock * hiddenSize, cudaMemcpyHostToDevice, stream);
+                }
+                idx += szBlock-2;
+            } else {
+                idx++;
+            }
+        }
+    } else {
+#if DGTRT_DBG
+        printf("storage not enabled @ %d\n", (int)getpid());
+#endif
+    }
+    #endif
     return 0;
 }
 

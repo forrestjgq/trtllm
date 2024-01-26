@@ -396,6 +396,11 @@ def parse_arguments(cmd_args=None):
         help=
         'By default we use contiguous KV cache. By setting this flag you enable paged KV cache'
     )
+    parser.add_argument(
+        '--use_lookup_plugin',
+        action="store_true",
+        default=False,
+        help="Activates the lookup plugin which enables embedding sharing.")
     parser.add_argument('--tokens_per_block',
                         type=int,
                         default=128,
@@ -922,6 +927,9 @@ def build_rank_engine(builder: Builder,
     if args.use_paged_context_fmha:
         assert args.enable_context_fmha or args.enable_context_fmha_fp32_acc, "context fmha must be enabled"
         network.plugin_config.set_paged_context_fmha()
+
+    if args.use_lookup_plugin:
+        network.plugin_config.set_lookup_plugin(dtype=args.dtype)
 
     with net_guard(network):
         # Prepare
