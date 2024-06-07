@@ -430,6 +430,11 @@ def parse_arguments(cmd_args=None):
         default=0,
         help='Setting to a value > 0 enables support for prompt tuning.')
     parser.add_argument(
+        '--model_type',
+        type=str,
+        default=None,
+        help='force model type')
+    parser.add_argument(
         '--gather_all_token_logits',
         action='store_true',
         default=False,
@@ -586,7 +591,8 @@ def parse_arguments(cmd_args=None):
         args.moe_top_k = getattr(hf_config, "num_experts_per_tok",
                                  args.moe_top_k)
         args.rotary_base = getattr(hf_config, "rope_theta", args.rotary_base)
-        args.model_type = hf_config.model_type
+        if args.model_type is None:
+            args.model_type = hf_config.model_type
         if hf_config.model_type == "mixtral":
             # HF LLaMA-type models are implicitly using gated activation.
             # With our MoE implementation, we must make it explicit
