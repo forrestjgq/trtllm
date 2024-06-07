@@ -564,13 +564,17 @@ def parse_arguments(cmd_args=None):
         args.rotary_scaling = rotary_scaling
 
     if args.model_dir is not None:
+        logger.info(f'model dir >> {args.model_dir}')
         hf_config = LlamaConfig.from_pretrained(args.model_dir)
-        if args.model_type is None and hf_config.model_type == "llava":
+        print("llama hf config:\n", hf_config)
+        # hxu: do NOT load llava from text_config since for params mismatch
+        if hf_config.model_type == "llava1":
             # LLaVA = Vision model + Llama LLM
-            # We load a llava config and use its' text config as llama config
+            # We load a llava config and use its' config as llama config
             hf_config = LlavaConfig.from_pretrained(args.model_dir).text_config
             hf_config.model_type = "llava"  # Replace llama with llava
 
+        logger.info(f'hf_config {hf_config}')
         args.inter_size = hf_config.intermediate_size  # override the inter_size for LLaMA
         args.n_embd = hf_config.hidden_size
         args.n_head = hf_config.num_attention_heads
@@ -806,10 +810,17 @@ def get_model_object(args, mapping, trt_dtype=None):
         logger.info(f'Loading HF LLaMA ... from {args.model_dir}')
         tik = time.time()
         if not args.load_by_shard:
-            if args.model_type == "llava":
+            if args.model_type == "llava1":
                 hf_llava = LlavaForConditionalGeneration.from_pretrained(
                     args.model_dir, torch_dtype="auto")
                 hf_llama = hf_llava.language_model
+                # hxu:load for config otherwise the params is default/wrong (such as hidden_size = 4096)
+                #config = LlavaConfig.from_pretrained(os.path.join(args.model_dir, "config.json"))
+                #logger.info(f'config >> {type(config)}  {config}')
+                #hf_llama =  LlamaForCausalLM._from_config(
+                #    config, attn_implementation=config._attn_implementation
+                #)
+                #logger.info(f'hf_llama >> {type(hf_llama)}  {hf_llama}')
             else:
                 hf_model = LlamaForCausalLM if args.model_type != "mixtral" else MixtralForCausalLM
                 hf_llama = hf_model.from_pretrained(
